@@ -7,6 +7,7 @@
 #include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -23,6 +24,48 @@ struct tuple resources[MAX_RESOURCES] = {
     {"/static/bar", "Bar", sizeof "Bar" - 1},
     {"/static/baz", "Baz", sizeof "Baz" - 1}};
 
+struct node_info {
+    uint16_t id;
+    const char *ip;
+    const char *port;
+};
+
+static struct node_info self_node;
+static struct node_info pred_node;
+static struct node_info succ_node;
+
+static void init_neighbor(struct node_info *node, const char *id_env,
+                          const char *ip_env, const char *port_env) {
+    const char *id_value = getenv(id_env);
+    const char *ip_value = getenv(ip_env);
+    const char *port_value = getenv(port_env);
+
+    if (!id_value || !ip_value || !port_value) {
+        fprintf(stderr, "Missing environment variable for %s/%s/%s.\n", id_env,
+                ip_env, port_env);
+        exit(EXIT_FAILURE);
+    }
+
+    char message[64];
+    snprintf(message, sizeof message, "Error parsing %s", id_env);
+
+    node->id = safe_strtoul(id_value, NULL, 10, message);
+    node->ip = ip_value;
+    node->port = port_value;
+}
+
+static bool is_responsible(uint16_t hash) {
+    if (self_node.id == pred_node.id) {
+        return true;
+    }
+
+    if (pred_node.id < self_node.id) {
+        return hash > pred_node.id && hash <= self_node.id;
+    }
+
+    return hash > pred_node.id || hash <= self_node.id;
+}
+
 /**
  * Sends an HTTP reply to the client based on the received request.
  *
@@ -37,10 +80,17 @@ void send_reply(int conn, struct request *request) {
     char *reply = buffer;
     size_t offset = 0;
 
+    uint16_t resource_hash =
+        pseudo_hash((const unsigned char *)request->uri, strlen(request->uri));
+
     fprintf(stderr, "Handling %s request for %s (%lu byte payload)\n",
             request->method, request->uri, request->payload_length);
 
-    if (strcmp(request->method, "GET") == 0) {
+    if (!is_responsible(resource_hash)) {
+        offset = sprintf(reply,
+                         "HTTP/1.1 303 See Other\r\nLocation: http://%s:%s%s\r\nContent-Length: 0\r\n\r\n",
+                         succ_node.ip, succ_node.port, request->uri);
+    } else if (strcmp(request->method, "GET") == 0) {
         // Find the resource with the given URI in the 'resources' array.
         size_t resource_length;
         const char *resource =
@@ -330,18 +380,28 @@ static int setup_udp_server_socket(struct sockaddr_in addr) {
 
 
 /**
- *  The program expects 3; otherwise, it returns EXIT_FAILURE.
+ *  The program expects 2 or 3 parameters; otherwise, it returns EXIT_FAILURE.
  *
  *  Call as:
  *
- *  ./build/webserver self.ip self.port
+ *  ./build/webserver self.ip self.port [self.id]
  */
 int main(int argc, char **argv) {
-    if (argc != 3) {
+    if (argc != 3 && argc != 4) {
         return EXIT_FAILURE;
     }
 
-    struct sockaddr_in addr = derive_sockaddr(argv[1], argv[2]);
+    self_node.ip = argv[1];
+    self_node.port = argv[2];
+
+    const char *self_id_value = argc == 4 ? argv[3] : "0";
+    self_node.id = safe_strtoul(self_id_value, NULL, 10,
+                                "Error parsing own node id");
+
+    init_neighbor(&pred_node, "PRED_ID", "PRED_IP", "PRED_PORT");
+    init_neighbor(&succ_node, "SUCC_ID", "SUCC_IP", "SUCC_PORT");
+
+    struct sockaddr_in addr = derive_sockaddr(self_node.ip, self_node.port);
 
     // Set up a server socket.
     int server_socket = setup_server_socket(addr);
