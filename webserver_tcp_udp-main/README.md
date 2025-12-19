@@ -62,3 +62,15 @@ curl -i -L http://127.0.0.1:2001/static/foo
 
 You can also use `PUT`/`DELETE` to modify resources on the responsible node and
 repeat the `GET` to confirm the change.
+
+## Run the automated checks
+
+The repository includes Python tests that spin up temporary peers to verify
+hashing, responsibility decisions, HTTP redirects, and UDP lookup handling.
+After building the server, run:
+
+```sh
+pytest test/test_praxis2.py -q
+```
+
+The tests expect the binary at `build/webserver` and will fail if it is missing.
